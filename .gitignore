@@ -123,6 +123,7 @@ data
 *.log.json
 work_dirs
 work_dirs/
+work_dir
 
 # Pytorch
 *.pth

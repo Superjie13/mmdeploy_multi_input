@@ -30,6 +30,7 @@ class Task(AdvancedEnum):
     VIDEO_RECOGNITION = 'VideoRecognition'
     ModelCompress = 'ModelCompress'
     MONO_DETECTION = 'MonoDetection'
+    OBJECT_DETECTION_MM = 'ObjectDetection_MM'
 
 
 class Codebase(AdvancedEnum):
@@ -93,7 +94,9 @@ SDK_TASK_MAP = {
     Task.ROTATED_DETECTION:
     dict(component='ResizeRBBox', cls_name='RotatedDetector'),
     Task.VIDEO_RECOGNITION:
-    dict(component='BaseHead', cls_name='VideoRecognizer')
+    dict(component='BaseHead', cls_name='VideoRecognizer'),
+    Task.OBJECT_DETECTION_MM:
+    dict(component='ResizeBBox', cls_name='Detector'),
 }
 
 TENSORRT_MAX_TOPK = 3840

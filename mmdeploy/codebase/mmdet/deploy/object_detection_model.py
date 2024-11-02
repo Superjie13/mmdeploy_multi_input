@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+import mmengine
 from mmengine import Config
 from mmengine.model.base_model.data_preprocessor import BaseDataPreprocessor
 from mmengine.registry import Registry
@@ -315,6 +316,67 @@ class End2EndModel(BaseBackendModel):
         return outputs
 
 
+@__BACKEND_MODEL.register_module('end2end_mm')
+class End2EndModel_MM(End2EndModel):
+    def __init__(self,
+                 backend: Backend,
+                 backend_files: Sequence[str],
+                 device: str,
+                 deploy_cfg: Union[str, Config],
+                 model_cfg: Optional[Union[str, Config]] = None,
+                 data_preprocessor: Optional[Union[dict, nn.Module]] = None,
+                 **kwargs):
+        super().__init__(
+            backend, backend_files, device, deploy_cfg, model_cfg,
+            data_preprocessor, **kwargs)
+
+        if self.deploy_cfg is not None:
+            ir_config = get_ir_config(deploy_cfg)
+            input_names = ir_config.get('input_names', None)
+            # use input_names instead in for multiple inputs
+            self.input_name = input_names if input_names else ['input.0', 'input.1']
+
+    def forward(self,
+                inputs: List[torch.Tensor],
+                data_samples: List[BaseDataElement],
+                mode: str = 'predict',
+                **kwargs) -> Any:
+        """The model forward.
+
+        Args:
+            inputs (List[torch.Tensor]): The input tensors (rgb, disp).
+            data_samples (List[BaseDataElement]): The data samples.
+                Defaults to None.
+            mode (str, optional): forward mode, only support `predict`.
+
+        Returns:
+            Any: Model output.
+        """
+        assert mode == 'predict', 'Deploy model only allow mode=="predict".'
+        inputs = [img.contiguous() for img in inputs]
+        outputs = self.predict(inputs)
+        batch_dets, batch_labels = outputs[:2]
+        batch_masks = outputs[2] if len(outputs) >= 3 else None
+        self.postprocessing_results(batch_dets, batch_labels, batch_masks,
+                                    data_samples)
+        return data_samples
+
+    def predict(self, img_pair: List[Tensor]) -> Tuple[np.ndarray, np.ndarray]:
+        """The interface for predict.
+
+        Args:
+            img_pair (List(Tensor)): Input image(s) in [N x C x H x W] format.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: dets of shape [N, num_det, 5]
+                and class labels of shape [N, num_det].
+        """
+        outputs = self.wrapper({self.input_name[0]: img_pair[0],
+                                self.input_name[1]: img_pair[1]})
+        outputs = self.wrapper.output_to_list(outputs)
+        return outputs
+
+
 @__BACKEND_MODEL.register_module('panoptic_end2end')
 class PanOpticEnd2EndModel(End2EndModel):
     """End to end model for inference of PanOptic Segmentation.
@@ -546,6 +608,97 @@ class PartitionSingleStageModel(End2EndModel):
                 class labels of shape [N, num_det].
         """
         outputs = self.wrapper({self.input_name: imgs})
+        outputs = self.wrapper.output_to_list(outputs)
+        scores, bboxes = outputs[:2]
+        return self.partition0_postprocess(scores, bboxes)
+
+
+@__BACKEND_MODEL.register_module('single_stage_mm')
+class PartitionSingleStageModel_MM(End2EndModel_MM):
+    """Partitioned single stage detection model.
+
+    Args:
+        backend (Backend): The backend enum, specifying backend type.
+        backend_files (Sequence[str]): Paths to all required backend files
+                (e.g. '.onnx' for ONNX Runtime, '.param' and '.bin' for ncnn).
+        device (str): A string specifying device type.
+        model_cfg (str|Config): Input model config file or Config
+            object.
+        deploy_cfg (str|Config): Deployment config file or loaded Config
+            object.
+        data_preprocessor (dict|nn.Module): The data preprocessor.
+    """
+
+    def __init__(self,
+                 backend: Backend,
+                 backend_files: Sequence[str],
+                 device: str,
+                 model_cfg: Union[str, Config],
+                 deploy_cfg: Union[str, Config],
+                 data_preprocessor: Optional[Union[dict, nn.Module]] = None,
+                 **kwargs):
+        super().__init__(backend, backend_files, device, deploy_cfg=deploy_cfg,
+                         data_preprocessor=data_preprocessor, **kwargs)
+        # load cfg if necessary
+        model_cfg = load_config(model_cfg)[0]
+        self.model_cfg = model_cfg
+
+        # TODO: map the input names to the actual input names in the model,i.e. 'rgb, disp'
+        self.input_name = ['input.0', 'input.1']
+
+    def _init_wrapper(self, backend, backend_files, device):
+        self.wrapper = BaseBackendModel._build_wrapper(
+            backend=backend,
+            backend_files=backend_files,
+            device=device,
+            output_names=None,  # None means get the output names automatically from session
+            deploy_cfg=self.deploy_cfg)
+
+    def partition0_postprocess(self, scores: Tensor, bboxes: Tensor):
+        """Perform post-processing for partition 0.
+
+        Args:
+            scores (Tensor): The detection scores of shape
+                [N, num_boxes, num_classes].
+            bboxes (Tensor): The bounding boxes of shape [N, num_boxes, 4].
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: dets of shape [N, num_det, 5] and
+                class labels of shape [N, num_det].
+        """
+        cfg = self.model_cfg.model.test_cfg
+        deploy_cfg = self.deploy_cfg
+
+        post_params = get_post_processing_params(deploy_cfg)
+        max_output_boxes_per_class = post_params.max_output_boxes_per_class
+        iou_threshold = cfg.nms.get('iou_threshold', post_params.iou_threshold)
+        score_threshold = cfg.get('score_thr', post_params.score_threshold)
+        pre_top_k = -1 if post_params.pre_top_k >= bboxes.shape[1] \
+            else post_params.pre_top_k
+        keep_top_k = cfg.get('max_per_img', post_params.keep_top_k)
+        ret = multiclass_nms(
+            bboxes,
+            scores,
+            max_output_boxes_per_class,
+            iou_threshold=iou_threshold,
+            score_threshold=score_threshold,
+            pre_top_k=pre_top_k,
+            keep_top_k=keep_top_k)
+        ret = [r.cpu() for r in ret]
+        return ret
+
+    def predict(self, img_pair: List[Tensor], *args, **kwargs):
+        """Implement forward test.
+
+        Args:
+            img_pair (List(Tensor)): Input image(s) in [N x C x H x W] format.
+
+        Returns:
+            list[np.ndarray, np.ndarray]: dets of shape [N, num_det, 5] and
+                class labels of shape [N, num_det].
+        """
+        outputs = self.wrapper({self.input_name[0]: img_pair[0],
+                                self.input_name[1]: img_pair[1]})
         outputs = self.wrapper.output_to_list(outputs)
         scores, bboxes = outputs[:2]
         return self.partition0_postprocess(scores, bboxes)
