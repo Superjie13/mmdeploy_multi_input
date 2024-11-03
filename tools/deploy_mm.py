@@ -303,5 +303,8 @@ def main():
                 ret_value=ret_value)
             backend_files += [quant_param, quant_bin]
 
+    logger.info('All process success.')
+
+
 if __name__ == '__main__':
     main()
