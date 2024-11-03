@@ -35,12 +35,6 @@ def parse_args():
     parser.add_argument('checkpoint', help='model checkpoint path')
     parser.add_argument('img_pair', help='image pair used to convert model model，input like: "path1, path2"')
     parser.add_argument(
-        '--test-img_pair',
-        default=None,
-        type=str,
-        nargs='+',
-        help='image pair used to test model')
-    parser.add_argument(
         '--work-dir',
         default=os.getcwd(),
         help='the dir to save logs and models')
@@ -308,39 +302,6 @@ def main():
                 kwargs=dict(),
                 ret_value=ret_value)
             backend_files += [quant_param, quant_bin]
-
-    if args.test_img_pair is None:
-        args.test_img_pair = img_pair
-
-    extra = dict(
-        backend=backend,
-        output_file=osp.join(args.work_dir, f'output_{backend.value}.jpg'),
-        show_result=args.show)
-    if backend == Backend.SNPE:
-        extra['uri'] = args.uri
-
-    # get backend inference result, try render
-    create_process(
-        f'visualize {backend.value} model',
-        target=visualize_model,
-        args=(model_cfg_path, deploy_cfg_path, backend_files, args.test_img_pair,
-              args.device),
-        kwargs=extra,
-        ret_value=ret_value)
-
-    # get pytorch model inference result, try visualize if possible
-    create_process(
-        'visualize pytorch model',
-        target=visualize_model,
-        args=(model_cfg_path, deploy_cfg_path, [checkpoint_path],
-              args.test_img_pair, args.device),
-        kwargs=dict(
-            backend=Backend.PYTORCH,
-            output_file=osp.join(args.work_dir, 'output_pytorch.jpg'),
-            show_result=args.show),
-        ret_value=ret_value)
-    logger.info('All process success.')
-
 
 if __name__ == '__main__':
     main()
